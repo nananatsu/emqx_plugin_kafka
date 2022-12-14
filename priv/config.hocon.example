@@ -1,0 +1,20 @@
+kafka {
+    producer {
+        servers = ["kafka-0-external.kafka.svc.cluster.local:9094","kafka-1-external.kafka.svc.cluster.local:9094","kafka-2-external.kafka.svc.cluster.local:9094"]
+        query_api_versions = true
+        connection_strategy = "per_partition"
+        min_metadata_refresh_interval = "5S"
+        produce = "sync"
+        produce_sync_timeout = "3s"
+        encode_payload_type = "plain"
+        sock_sndbuf = "1MB"
+    }
+    filter = [
+        {
+         hook = "message.publish"
+         filter = "test/#"
+         topic = "test"
+         value = "${topic}###${payload}###${ts}"
+        }
+    ] 
+}

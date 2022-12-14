@@ -1,0 +1,12 @@
+{application, emqx_plugin_kafka, [
+    {description, "EMQ X Plugin kafka"},
+    {vsn, "5.0.0"},
+    {modules, []},
+    {registered, [emqx_plugin_kafka_sup]},
+    {applications, [kernel, stdlib, map_sets, brod, trie, wolff]},
+    {mod, {emqx_plugin_kafka_app, []}},
+    {env, []},
+    {licenses, ["Apache-2.0"]},
+    {maintainers, []},
+    {links, []}
+]}.

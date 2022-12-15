@@ -17,14 +17,13 @@
 -module(emqx_plugin_kafka).
 
 -export([
-    start_kafka/1, send_msg_to_kafka/4
+    start_kafka/1, send_msg_to_kafka/4, start_producer/5
 ]).
 
--import(proplists, [get_value/2, get_value/3]).
-
-start_kafka(Conf) ->
-    ClientId = erlang:list_to_binary(get_value(client_id, Conf, "emqx_kafka")),
-    Address = get_value(servers, Conf, ["localhost:9092"]),
+-spec start_kafka(map()) -> binary().
+start_kafka(ClientConf) ->
+    ClientId = erlang:list_to_binary(maps:get(<<"client_id">>, ClientConf, "emqx_kafka")),
+    Address = maps:get(<<"servers">>, ClientConf, ["localhost:9092"]),
     KafkaEndpoints = lists:map(
         fun(S) ->
             Arr = string:split(S, ":"),
@@ -35,21 +34,58 @@ start_kafka(Conf) ->
         Address
     ),
 
-    ClientConf = #{
-        extra_sock_opts => get_value(sock_opts, Conf, []),
-        connection_strategy => get_value(connection_strategy, Conf, per_partition),
-        min_metadata_refresh_interval => get_value(min_metadata_refresh_interval, Conf, 5000),
-        query_api_versions => get_value(query_api_versions, Conf, true)
+    Conf = #{
+        connection_strategy => maps:get(<<"(connection_strategy">>, ClientConf, per_partition),
+        min_metadata_refresh_interval => maps:get(
+            <<"min_metadata_refresh_interval">>, ClientConf, 5000
+        ),
+        query_api_versions => maps:get(<<"query_api_versions">>, ClientConf, true),
+        request_timeout => maps:get(<<"request_timeout">>, ClientConf, 240000)
     },
+
+    logger:debug("connect kafka ~p ~p ~p ", [ClientId, KafkaEndpoints, Conf]),
 
     {ok, _} = application:ensure_all_started(wolff),
     {ok, _ClientPid} =
         wolff:ensure_supervised_client(
             ClientId,
             KafkaEndpoints,
-            ClientConf
+            Conf
         ),
     ClientId.
+
+-spec start_producer(binary(), binary(), atom(), map(), map()) ->
+    {ok, atom(), integer(), wolff:producers()} | {error, any()}.
+start_producer(ClientId, Topic, Name, ProducerConf, TopicProducerConf) ->
+    Cfg = maps:merge(ProducerConf, TopicProducerConf),
+
+    MaybeReplayqDir = maps:get(<<"replayq_dir">>, Cfg, false),
+    ReplayqDir =
+        case MaybeReplayqDir of
+            false -> undefined;
+            _ -> filename:join([MaybeReplayqDir, node()])
+        end,
+
+    Sync = maps:get(<<"produce">>, Cfg, sync),
+    Timeout = maps:get(<<"produce_sync_timeout">>, Cfg, 3000),
+    PayloadFormat = maps:get(<<"encode_payload_type">>, Cfg, plain),
+
+    Conf = #{
+        partitioner => maps:get(<<"partitioner">>, Cfg, random),
+        compression => maps:get(<<"compression">>, Cfg, no_compression),
+        replayq_dir => ReplayqDir,
+        name => Name
+    },
+
+    case wolff:ensure_supervised_producers(ClientId, Topic, Conf) of
+        {ok, Producers} ->
+            logger:debug("connect producer ~p ~p ~p ", [ClientId, Topic, ProducerConf]),
+            {ok, PayloadFormat, Sync, Timeout, Producers};
+        {error, Error} ->
+            logger:error("Start topic:~p producers fail, error:~p", [Topic, Error]),
+            wolff:stop_and_delete_supervised_producers(ClientId, Topic, Name),
+            {error, Error}
+    end.
 
 send_msg_to_kafka(Producers, {Key, JsonMsg}, Sync, Timeout) ->
     try
@@ -62,10 +98,14 @@ send_msg_to_kafka(Producers, {Key, JsonMsg}, Sync, Timeout) ->
 produce(Producers, Key, JsonMsg, Sync, Timeout) when is_list(JsonMsg) ->
     produce(Producers, Key, iolist_to_binary(JsonMsg), Sync, Timeout);
 produce(Producers, Key, JsonMsg, Sync, Timeout) ->
-    logger:debug("Produce key: ~p, payload: ~p ", [Key, JsonMsg]),
+    logger:debug("Produce key: ~p, payload: ~p ,sync: ~p ,timeout: ~p ,producers: ~p ", [
+        Key, JsonMsg, Sync, Timeout, Producers
+    ]),
     case Sync of
         sync ->
-            wolff:send_sync(Producers, [#{key => Key, value => JsonMsg}], Timeout);
+            wolff:send_sync(
+                Producers, [#{key => Key, value => JsonMsg}], Timeout
+            );
         async ->
             wolff:send(
                 Producers, [#{key => Key, value => JsonMsg}], fun(_Partition, _BaseOffset) -> ok end

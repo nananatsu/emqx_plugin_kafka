@@ -20,7 +20,7 @@
 %% no need for this include if we call emqx_message:to_map/1 to convert it to a map
 -include_lib("emqx/include/emqx.hrl").
 -include_lib("emqx/include/emqx_hooks.hrl").
-
+-include_lib("emqx/include/emqx_placeholder.hrl").
 %% for logging
 -include_lib("emqx/include/logger.hrl").
 
@@ -37,50 +37,32 @@
 ]).
 
 -import(proplists, [get_value/2, get_value/3]).
--import(emqx_plugin_kafka, [start_kafka/1, send_msg_to_kafka/4]).
+-import(emqx_plugin_kafka, [start_kafka/1, send_msg_to_kafka/4, start_producer/5]).
 
 %% Called when the plugin application start
 load(Conf) ->
-    ClientId = start_kafka(Conf),
+    ClientConf = get_value(client, Conf, #{}),
+    ProducerConf = get_value(producer, Conf, #{}),
+    HooKConf = get_value(hook, Conf, []),
 
-    HookList = parse_hook(get_value(filter, Conf, [])),
-    MaybeReplayqDir = get_value(replayq_dir, Conf, false),
-    ReplayqDir =
-        case MaybeReplayqDir of
-            false ->
-                undefined;
-            _ ->
-                filename:join([MaybeReplayqDir, node()])
-        end,
-    ProducerConf = get_value(producer, Conf, []),
-    Sync = get_value(produce, Conf, sync),
-    Timeout = get_value(produce_sync_timeout, Conf, 3000),
+    ClientId = start_kafka(ClientConf),
+    HookList = parse_hook(HooKConf),
 
     NProducers = lists:foldl(
         fun(
-            {Hook, Filter, Key, Value, Topic, Strategy, Seq, PayloadFormat},
+            {Hook, Filter, Key, Value, Topic, Seq, TopicProducerConf},
             Acc
         ) ->
             Name = list_to_atom(lists:concat([atom_to_list(Hook), "_", Seq])),
-            ProducerConfig =
-                ProducerConf ++
-                    [
-                        {partitioner, Strategy},
-                        {replayq_dir, ReplayqDir},
-                        {name, Name}
-                    ],
-            case
-                wolff:ensure_supervised_producers(ClientId, Topic, maps:from_list(ProducerConfig))
-            of
-                {ok, Producers} ->
+
+            case start_producer(ClientId, Topic, Name, ProducerConf, TopicProducerConf) of
+                {ok, PayloadFormat, Sync, Timeout, Producers} ->
                     load_(
                         Hook,
                         {Filter, Producers, Key, Value, PayloadFormat, Sync, Timeout}
                     ),
                     [Producers | Acc];
-                {error, Error} ->
-                    logger:error("Start topic:~p producers fail, error:~p", [Topic, Error]),
-                    wolff:stop_and_delete_supervised_producers(ClientId, Topic, Name),
+                {error, _} ->
                     Acc
             end
         end,
@@ -88,56 +70,27 @@ load(Conf) ->
         HookList
     ),
     logger:info("~s is loaded.~n", [emqx_plugin_kafka]),
-    {ok, ClientId, NProducers}.
+    {ok, ClientId, NProducers, HookList}.
 
 load_(Hook, Params) ->
     case Hook of
         'client.connected' ->
-            emqx:hook(
-                Hook,
-                fun emqx_plugin_kafka:on_client_connected/3,
-                [Params]
-            );
+            hook(Hook, {?MODULE, on_client_connected, [Params]});
         'client.disconnected' ->
-            emqx:hook(
-                Hook,
-                fun emqx_plugin_kafka:on_client_disconnected/4,
-                [Params]
-            );
+            hook(Hook, {?MODULE, on_client_disconnected, [Params]});
         'session.subscribed' ->
-            emqx:hook(
-                Hook,
-                fun emqx_plugin_kafka:on_session_subscribed/4,
-                [Params]
-            );
+            hook(Hook, {?MODULE, on_session_subscribed, [Params]});
         'session.unsubscribed' ->
-            emqx:hook(
-                Hook,
-                fun emqx_plugin_kafka:on_session_unsubscribed/4,
-                [Params]
-            );
+            hook(Hook, {?MODULE, on_session_unsubscribed, [Params]});
         'message.publish' ->
-            emqx:hook(
-                Hook,
-                fun emqx_plugin_kafka:on_message_publish/2,
-                [Params]
-            );
+            hook(Hook, {?MODULE, on_message_publish, [Params]});
         'message.acked' ->
-            emqx:hook(
-                Hook,
-                fun emqx_plugin_kafka:on_message_acked/3,
-                [Params]
-            );
+            hook(Hook, {?MODULE, on_message_acked, [Params]});
         'message.delivered' ->
-            emqx:hook(
-                Hook,
-                fun emqx_plugin_kafka:on_message_delivered/3,
-                [Params]
-            )
+            hook(Hook, {?MODULE, on_message_delivered, [Params]})
     end.
 
-unload(Conf) ->
-    HookList = parse_hook(get_value(filter, Conf, [])),
+unload(HookList) ->
     lists:foreach(
         fun({Hook, _, _, _, _, _, _, _, _}) ->
             unload_(Hook)
@@ -150,41 +103,28 @@ unload(Conf) ->
 unload_(Hook) ->
     case Hook of
         'client.connected' ->
-            emqx:unhook(
-                Hook,
-                fun emqx_plugin_kafka:on_client_connected/3
-            );
+            unhook(Hook, {?MODULE, on_client_connected});
         'client.disconnected' ->
-            emqx:unhook(
-                Hook,
-                fun emqx_plugin_kafka:on_client_disconnected/4
-            );
+            unhook(Hook, {?MODULE, on_client_disconnected});
         'session.subscribed' ->
-            emqx:unhook(
-                Hook,
-                fun emqx_plugin_kafka:on_session_subscribed/4
-            );
+            unhook(Hook, {?MODULE, on_session_subscribed});
         'session.unsubscribed' ->
-            emqx:unhook(
-                Hook,
-                fun emqx_plugin_kafka:on_session_unsubscribed/4
-            );
+            unhook(Hook, {?MODULE, on_session_unsubscribed});
         'message.publish' ->
-            emqx:unhook(
-                Hook,
-                fun emqx_plugin_kafka:on_message_publish/2
-            );
+            unhook(Hook, {?MODULE, on_message_publish});
         'message.acked' ->
-            emqx:unhook(
-                Hook,
-                fun emqx_plugin_kafka:on_message_acked/3
-            );
+            unhook(Hook, {?MODULE, on_message_acked});
         'message.delivered' ->
-            emqx:unhook(
-                Hook,
-                fun emqx_plugin_kafka:on_message_delivered/3
-            )
+            unhook(Hook, {?MODULE, on_message_delivered})
     end.
+
+hook(HookPoint, MFA) ->
+    %% use highest hook priority so this module's callbacks
+    %% are evaluated before the default hooks in EMQX
+    emqx_hooks:add(HookPoint, MFA, _Property = ?HP_HIGHEST).
+
+unhook(HookPoint, MFA) ->
+    emqx_hooks:del(HookPoint, MFA).
 
 on_client_connected(
     ClientInfo,
@@ -316,6 +256,10 @@ on_message_publish(
         true ->
             Data = format_pub_msg(Msg, Value, PayloadFormat),
 
+            logger:warning("on_message_publish sync: ~p ,timeout: ~p ,producers: ~p ", [
+                Sync, Timeout, Producers
+            ]),
+
             Username = maps:get(username, Headers, <<>>),
             send_msg_to_kafka(
                 Producers,
@@ -388,24 +332,22 @@ parse_hook([Item | Hooks], Acc, Seq) ->
     Hook = maps:get(<<"hook">>, Item),
     Topic = maps:get(<<"topic">>, Item),
     Filter = maps:get(<<"filter">>, Item),
-    Key = maps:get(<<"key">>, Item),
+    Key = maps:get(<<"key">>, Item, undefined),
     Value = format_value_pattern(maps:get(<<"value">>, Item)),
-    Strategy = maps:get(<<"strategy">>, Item, "random"),
-    PayloadFormat = maps:get(<<"encode_payload_type">>, Item, "base64"),
     NewSeq = Seq + 1,
+    ProducerConf = maps:get(<<"producer">>, Item, #{}),
 
     parse_hook(
         Hooks,
         [
             {
                 erlang:list_to_atom(Hook),
-                Filter,
-                Key,
+                erlang:list_to_binary(Filter),
+                erlang:list_to_binary(Key),
                 Value,
-                Topic,
-                Strategy,
+                erlang:list_to_binary(Topic),
                 NewSeq,
-                PayloadFormat
+                ProducerConf
             }
             | Acc
         ],
@@ -424,7 +366,7 @@ format_sub_json(ClientId, Topic, Opts) ->
 
 payload_format(Payload, PayloadFormat) ->
     case PayloadFormat of
-        <<"base64">> -> base64:encode(Payload);
+        base64 -> base64:encode(Payload);
         _ -> Payload
     end.
 
@@ -519,7 +461,7 @@ a2b(A) ->
 format_value_pattern(undefined) ->
     undefined;
 format_value_pattern(Value) ->
-    emqx_rule_utils:preproc_tmpl(Value).
+    emqx_placeholder:preproc_tmpl(Value).
 
 feed_key(undefined, _) ->
     <<>>;

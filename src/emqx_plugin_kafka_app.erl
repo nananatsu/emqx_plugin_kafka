@@ -34,25 +34,29 @@ start(_StartType, _StartArgs) ->
 
             {ok, Sup} = emqx_plugin_kafka_sup:start_link(),
             case emqx_plugin_kafka_hook:load(KafkaProps) of
-                {ok, ClientId, []} ->
+                {ok, ClientId, [], _} ->
                     logger:error("start emqx_plugin_kafka fail"),
                     wolff:stop_and_delete_supervised_client(ClientId);
-                {ok, ClientId, NProducers} ->
+                {ok, ClientId, NProducers, HookList} ->
                     logger:info("start emqx_plugin_kafka success"),
-                    {ok, Sup, #{client_id => ClientId, n_producers => NProducers}}
+                    {ok, Sup, #{client_id => ClientId, n_producers => NProducers, hook => HookList}}
             end
     catch
         throw:{Schema, Errors} ->
             logger:error("generate kafka config fail ~p ~p ~n", Schema, Errors)
     end.
 
-stop(#{client_id := ClientId, n_producers := NProducers}) ->
-    emqx_plugin_kafka_hook:unload(),
+stop(#{client_id := ClientId, n_producers := NProducers, hook := HookList}) ->
+    logger:info("###### stop kafka plugin "),
+    emqx_plugin_kafka_hook:unload(HookList),
 
+    logger:info("~p is unloaded.~n", [HookList]),
     lists:foreach(
         fun(Producers) ->
             wolff:stop_and_delete_supervised_producers(Producers)
         end,
         NProducers
     ),
+
+    logger:info("NProducers closed ~p ~n ", [NProducers]),
     ok = wolff:stop_and_delete_supervised_client(ClientId).

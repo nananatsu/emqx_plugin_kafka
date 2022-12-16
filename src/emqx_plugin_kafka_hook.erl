@@ -24,7 +24,7 @@
 %% for logging
 -include_lib("emqx/include/logger.hrl").
 
--export([load/1, unload/1]).
+-export([load/3, unload/1]).
 
 -export([
     on_client_connected/3,
@@ -37,14 +37,10 @@
 ]).
 
 -import(proplists, [get_value/2, get_value/3]).
--import(emqx_plugin_kafka, [start_kafka/1, send_msg_to_kafka/4, start_producer/5]).
+-import(emqx_plugin_kafka, [start_kafka/1, start_producer/5, send_msg_to_kafka/6]).
 
 %% Called when the plugin application start
-load(Conf) ->
-    ClientConf = get_value(client, Conf, #{}),
-    ProducerConf = get_value(producer, Conf, #{}),
-    HooKConf = get_value(hook, Conf, []),
-
+load(ClientConf, ProducerConf, HooKConf) ->
     ClientId = start_kafka(ClientConf),
     HookList = parse_hook(HooKConf),
 
@@ -92,7 +88,7 @@ load_(Hook, Params) ->
 
 unload(HookList) ->
     lists:foreach(
-        fun({Hook, _, _, _, _, _, _, _, _}) ->
+        fun({Hook, _, _, _, _, _, _}) ->
             unload_(Hook)
         end,
         HookList
@@ -129,20 +125,24 @@ unhook(HookPoint, MFA) ->
 on_client_connected(
     ClientInfo,
     _ConnInfo,
-    {_, Producers, Key, _, Sync, Timeout}
+    {_, Producers, Key, Value, _, Sync, Timeout}
 ) ->
     logger:info("client connect: ~n ~p ~n ~p~n", [ClientInfo, _ConnInfo]),
     ClientId = maps:get(clientid, ClientInfo, undefined),
     Username = maps:get(username, ClientInfo, undefined),
-    Data = [
-        {clientid, ClientId},
-        {username, Username},
-        {node, a2b(node())},
-        {ts, erlang:system_time(millisecond)}
-    ],
     send_msg_to_kafka(
         Producers,
-        {feed_key(Key, {ClientId, Username}), data_format(Data)},
+        {
+            node(),
+            ClientId,
+            undefined,
+            {undefined, undefined},
+            Username,
+            undefined,
+            erlang:system_time(millisecond)
+        },
+        Key,
+        Value,
         Sync,
         Timeout
     ),
@@ -166,23 +166,26 @@ on_client_disconnected(
     ClientInfo,
     Reason,
     _ConnInfo,
-    {_, Producers, Key, _, _, Sync, Timeout}
+    {_, Producers, Key, Value, _, Sync, Timeout}
 ) when
     is_atom(Reason); is_integer(Reason)
 ->
     logger:info("client disconnected: ~n ~p ~n ~p~n", [ClientInfo, Reason]),
     ClientId = maps:get(clientid, ClientInfo, undefined),
     Username = maps:get(username, ClientInfo, undefined),
-    Data = [
-        {clientid, ClientId},
-        {username, Username},
-        {node, a2b(node())},
-        {reason, a2b(Reason)},
-        {ts, erlang:system_time(millisecond)}
-    ],
     send_msg_to_kafka(
         Producers,
-        {feed_key(Key, {ClientId, Username}), data_format(Data)},
+        {
+            node(),
+            ClientId,
+            undefined,
+            {undefined, undefined},
+            Username,
+            undefined,
+            erlang:system_time(millisecond)
+        },
+        Key,
+        Value,
         Sync,
         Timeout
     ),
@@ -204,16 +207,25 @@ on_session_subscribed(
     ClientInfo,
     Topic,
     Opts,
-    {Filter, Producers, Key, _, _, Sync, Timeout}
+    {Filter, Producers, Key, Value, _, Sync, Timeout}
 ) ->
     case emqx_topic:match(Topic, Filter) of
         true ->
             ClientId = maps:get(clientid, ClientInfo, undefined),
             Username = maps:get(username, ClientInfo, undefined),
-            Data = format_sub_json(ClientId, Topic, Opts),
             send_msg_to_kafka(
                 Producers,
-                {feed_key(Key, {ClientId, Username, Topic}), data_format(Data)},
+                {
+                    node(),
+                    ClientId,
+                    Topic,
+                    {undefined, undefined},
+                    Username,
+                    maps:get(qos, Opts, 0),
+                    erlang:system_time(millisecond)
+                },
+                Key,
+                Value,
                 Sync,
                 Timeout
             );
@@ -226,16 +238,25 @@ on_session_unsubscribed(
     ClientInfo,
     Topic,
     Opts,
-    {Filter, Producers, Key, _, _, Sync, Timeout}
+    {Filter, Producers, Key, Value, _, Sync, Timeout}
 ) ->
     case emqx_topic:match(Topic, Filter) of
         true ->
             ClientId = maps:get(clientid, ClientInfo, undefined),
             Username = maps:get(username, ClientInfo, undefined),
-            Data = format_sub_json(ClientId, Topic, Opts),
             send_msg_to_kafka(
                 Producers,
-                {feed_key(Key, {ClientId, Username, Topic}), data_format(Data)},
+                {
+                    node(),
+                    ClientId,
+                    Topic,
+                    {undefined, undefined},
+                    Username,
+                    maps:get(qos, Opts, 0),
+                    erlang:system_time(millisecond)
+                },
+                Key,
+                Value,
                 Sync,
                 Timeout
             );
@@ -246,24 +267,30 @@ on_session_unsubscribed(
 
 on_message_publish(
     Msg = #message{
-        topic = Topic,
         from = From,
-        headers = Headers
+        topic = Topic,
+        payload = Payload,
+        headers = Headers,
+        qos = Qos,
+        timestamp = Ts
     },
     {Filter, Producers, Key, Value, PayloadFormat, Sync, Timeout}
 ) ->
     case emqx_topic:match(Topic, Filter) of
         true ->
-            Data = format_pub_msg(Msg, Value, PayloadFormat),
-
-            logger:warning("on_message_publish sync: ~p ,timeout: ~p ,producers: ~p ", [
-                Sync, Timeout, Producers
-            ]),
-
-            Username = maps:get(username, Headers, <<>>),
             send_msg_to_kafka(
                 Producers,
-                {feed_key(Key, {From, Username, Topic}), data_format(Data)},
+                {
+                    node(),
+                    From,
+                    Topic,
+                    {Payload, PayloadFormat},
+                    maps:get(username, Headers, <<>>),
+                    Qos,
+                    Ts
+                },
+                Key,
+                Value,
                 Sync,
                 Timeout
             );
@@ -274,22 +301,25 @@ on_message_publish(
 
 on_message_acked(
     ClientInfo,
-    Msg = #message{topic = Topic},
-    {Filter, Producers, Key, _, PayloadFormat, Sync, Timeout}
+    Msg = #message{
+        % from = From,
+        topic = Topic,
+        payload = Payload,
+        % headers = Headers,
+        qos = Qos,
+        timestamp = Ts
+    },
+    {Filter, Producers, Key, Value, PayloadFormat, Sync, Timeout}
 ) ->
     case emqx_topic:match(Topic, Filter) of
         true ->
             ClientId = maps:get(clientid, ClientInfo, undefined),
             Username = maps:get(username, ClientInfo, undefined),
-            Data = format_revc_msg(
-                ClientId,
-                Username,
-                Msg,
-                PayloadFormat
-            ),
             send_msg_to_kafka(
                 Producers,
-                {feed_key(Key, {ClientId, Username, Topic}), data_format(Data)},
+                {node(), ClientId, Topic, {Payload, PayloadFormat}, Username, Qos, Ts},
+                Key,
+                Value,
                 Sync,
                 Timeout
             );
@@ -300,22 +330,25 @@ on_message_acked(
 
 on_message_delivered(
     ClientInfo,
-    Msg = #message{topic = Topic},
-    {Filter, Producers, Key, _, PayloadFormat, Sync, Timeout}
+    Msg = #message{
+        % from = From,
+        topic = Topic,
+        payload = Payload,
+        % headers = Headers,
+        qos = Qos,
+        timestamp = Ts
+    },
+    {Filter, Producers, Key, Value, PayloadFormat, Sync, Timeout}
 ) ->
     case emqx_topic:match(Topic, Filter) of
         true ->
             ClientId = maps:get(clientid, ClientInfo, undefined),
             Username = maps:get(username, ClientInfo, undefined),
-            Data = format_revc_msg(
-                ClientId,
-                Username,
-                Msg,
-                PayloadFormat
-            ),
             send_msg_to_kafka(
                 Producers,
-                {feed_key(Key, {ClientId, Username, Topic}), data_format(Data)},
+                {node(), ClientId, Topic, {Payload, PayloadFormat}, Username, Qos, Ts},
+                Key,
+                Value,
                 Sync,
                 Timeout
             );
@@ -332,7 +365,7 @@ parse_hook([Item | Hooks], Acc, Seq) ->
     Hook = maps:get(<<"hook">>, Item),
     Topic = maps:get(<<"topic">>, Item),
     Filter = maps:get(<<"filter">>, Item),
-    Key = maps:get(<<"key">>, Item, undefined),
+    Key = format_value_pattern(maps:get(<<"key">>, Item, undefined)),
     Value = format_value_pattern(maps:get(<<"value">>, Item)),
     NewSeq = Seq + 1,
     ProducerConf = maps:get(<<"producer">>, Item, #{}),
@@ -343,7 +376,7 @@ parse_hook([Item | Hooks], Acc, Seq) ->
             {
                 erlang:list_to_atom(Hook),
                 erlang:list_to_binary(Filter),
-                erlang:list_to_binary(Key),
+                Key,
                 Value,
                 erlang:list_to_binary(Topic),
                 NewSeq,
@@ -354,157 +387,7 @@ parse_hook([Item | Hooks], Acc, Seq) ->
         NewSeq
     ).
 
-format_sub_json(ClientId, Topic, Opts) ->
-    Qos = maps:get(qos, Opts, 0),
-    [
-        {clientid, ClientId},
-        {topic, Topic},
-        {qos, Qos},
-        {node, a2b(node())},
-        {ts, erlang:system_time(millisecond)}
-    ].
-
-payload_format(Payload, PayloadFormat) ->
-    case PayloadFormat of
-        base64 -> base64:encode(Payload);
-        _ -> Payload
-    end.
-
-format_pub_msg(Msg, undefined, PayloadFormat) ->
-    #message{
-        from = From,
-        topic = Topic,
-        payload = Payload,
-        headers = Headers,
-        qos = Qos,
-        timestamp = Ts
-    } =
-        Msg,
-    Username = maps:get(username, Headers, <<>>),
-    [
-        {clientid, From},
-        {username, Username},
-        {topic, Topic},
-        {payload, payload_format(Payload, PayloadFormat)},
-        {qos, Qos},
-        {node, a2b(node())},
-        {ts, Ts}
-    ];
-format_pub_msg(Msg, Value, PayloadFormat) ->
-    #message{
-        from = From,
-        topic = Topic,
-        payload = Payload,
-        headers = Headers,
-        qos = Qos,
-        timestamp = Ts
-    } =
-        Msg,
-    iolist_to_binary(
-        string:join(
-            lists:map(
-                fun
-                    ({str, Str}) ->
-                        binary_to_list(Str);
-                    ({var, {var, Key}}) ->
-                        case Key of
-                            <<"from">> -> binary_to_list(From);
-                            <<"username">> -> binary_to_list(maps:get(username, Headers, <<>>));
-                            <<"topic">> -> binary_to_list(Topic);
-                            <<"payload">> -> binary_to_list(payload_format(Payload, PayloadFormat));
-                            <<"qos">> -> integer_to_list(Qos);
-                            <<"node">> -> binary_to_list(a2b(node()));
-                            <<"ts">> -> integer_to_list(Ts)
-                        end
-                end,
-                Value
-            ),
-            ""
-        )
-    ).
-
-format_revc_msg(
-    ClientId,
-    Username,
-    Msg,
-    PayloadFormat
-) ->
-    #message{
-        from = From,
-        topic = Topic,
-        payload = Payload,
-        qos = Qos,
-        timestamp = Ts
-    } =
-        Msg,
-    [
-        {clientid, ClientId},
-        {username, Username},
-        {from, From},
-        {topic, Topic},
-        {payload, payload_format(Payload, PayloadFormat)},
-        {qos, Qos},
-        {node, a2b(node())},
-        {ts, Ts}
-    ].
-
-data_format(Data) when is_binary(Data) ->
-    Data;
-data_format(Data) ->
-    emqx_json:encode(Data).
-
-a2b(A) when is_atom(A) ->
-    erlang:atom_to_binary(A, utf8);
-a2b(A) ->
-    A.
-
 format_value_pattern(undefined) ->
     undefined;
 format_value_pattern(Value) ->
     emqx_placeholder:preproc_tmpl(Value).
-
-feed_key(undefined, _) ->
-    <<>>;
-feed_key(<<"${clientid}">>, {ClientId, _Username}) ->
-    ClientId;
-feed_key(<<"${username}">>, {_ClientId, Username}) ->
-    Username;
-feed_key(
-    <<"${clientid}">>,
-    {ClientId, _Username, _Topic}
-) ->
-    ClientId;
-feed_key(
-    <<"${username}">>,
-    {_ClientId, Username, _Topic}
-) ->
-    Username;
-feed_key(
-    <<"${topic}">>,
-    {_ClientId, _Username, Topic}
-) ->
-    Topic;
-feed_key(Key, {_ClientId, _Username, Topic}) ->
-    case
-        re:run(
-            Key,
-            <<"{([^}]+)}">>,
-            [{capture, all, binary}, global]
-        )
-    of
-        nomatch ->
-            <<>>;
-        {match, Match} ->
-            TopicWords = emqx_topic:words(Topic),
-            lists:foldl(
-                fun([_, Index], Acc) ->
-                    Word = lists:nth(
-                        binary_to_integer(Index),
-                        TopicWords
-                    ),
-                    <<Acc/binary, Word/binary>>
-                end,
-                <<>>,
-                Match
-            )
-    end.

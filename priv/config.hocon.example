@@ -21,7 +21,7 @@ kafka {
          filter = "test/#"
          topic = "test"
          key = "${topic}"
-         value = "${topic}###${payload}###${ts}"
+         value = "{ \"topic\" : \"${topic}\", \"payload\" : \"${payload}\", \"ts\" : \"${ts}\" }"
          producer {
             produce = sync
             produce_sync_timeout = 3000

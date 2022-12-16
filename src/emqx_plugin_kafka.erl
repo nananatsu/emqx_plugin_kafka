@@ -17,7 +17,7 @@
 -module(emqx_plugin_kafka).
 
 -export([
-    start_kafka/1, send_msg_to_kafka/4, start_producer/5
+    start_kafka/1, send_msg_to_kafka/6, start_producer/5
 ]).
 
 -spec start_kafka(map()) -> binary().
@@ -87,27 +87,73 @@ start_producer(ClientId, Topic, Name, ProducerConf, TopicProducerConf) ->
             {error, Error}
     end.
 
-send_msg_to_kafka(Producers, {Key, JsonMsg}, Sync, Timeout) ->
+send_msg_to_kafka(Producers, Msg, KeyPattern, ValuePattern, Sync, Timeout) ->
+    Value = fill_value_pattern(ValuePattern, Msg),
+    Key = fill_value_pattern(KeyPattern, Msg),
+
     try
-        produce(Producers, Key, JsonMsg, Sync, Timeout)
+        produce(Producers, data_format(Key), data_format(Value), Sync, Timeout)
     catch
         Error:Reason:Stask ->
             logger:error("Call produce error: ~p, ~p", [Error, {Reason, Stask}])
     end.
 
-produce(Producers, Key, JsonMsg, Sync, Timeout) when is_list(JsonMsg) ->
-    produce(Producers, Key, iolist_to_binary(JsonMsg), Sync, Timeout);
-produce(Producers, Key, JsonMsg, Sync, Timeout) ->
+produce(Producers, Key, Value, Sync, Timeout) when is_list(Value) ->
+    produce(Producers, Key, iolist_to_binary(Value), Sync, Timeout);
+produce(Producers, Key, Value, Sync, Timeout) ->
     logger:debug("Produce key: ~p, payload: ~p ,sync: ~p ,timeout: ~p ,producers: ~p ", [
-        Key, JsonMsg, Sync, Timeout, Producers
+        Key, Value, Sync, Timeout, Producers
     ]),
     case Sync of
         sync ->
             wolff:send_sync(
-                Producers, [#{key => Key, value => JsonMsg}], Timeout
+                Producers, [#{key => Key, value => Value}], Timeout
             );
         async ->
             wolff:send(
-                Producers, [#{key => Key, value => JsonMsg}], fun(_Partition, _BaseOffset) -> ok end
+                Producers, [#{key => Key, value => Value}], fun(_Partition, _BaseOffset) -> ok end
             )
     end.
+
+fill_value_pattern(undefined, _) ->
+    <<>>;
+fill_value_pattern(ValuePattern, {Node, From, Topic, {Payload, PayloadFormat}, Username, Qos, Ts}) ->
+    iolist_to_binary(
+        string:join(
+            lists:map(
+                fun
+                    ({str, Str}) ->
+                        binary_to_list(Str);
+                    ({var, {var, Key}}) ->
+                        case Key of
+                            <<"clientid">> -> binary_to_list(From);
+                            <<"from">> -> binary_to_list(From);
+                            <<"username">> -> binary_to_list(Username);
+                            <<"topic">> -> binary_to_list(Topic);
+                            <<"payload">> -> binary_to_list(payload_format(Payload, PayloadFormat));
+                            <<"qos">> -> integer_to_list(Qos);
+                            <<"node">> -> binary_to_list(a2b(Node));
+                            <<"ts">> -> integer_to_list(Ts)
+                        end
+                end,
+                ValuePattern
+            ),
+            ""
+        )
+    ).
+
+payload_format(Payload, PayloadFormat) ->
+    case PayloadFormat of
+        base64 -> base64:encode(Payload);
+        _ -> Payload
+    end.
+
+data_format(Data) when is_binary(Data) ->
+    Data;
+data_format(Data) ->
+    emqx_json:encode(Data).
+
+a2b(A) when is_atom(A) ->
+    erlang:atom_to_binary(A, utf8);
+a2b(A) ->
+    A.

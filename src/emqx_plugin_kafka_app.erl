@@ -28,7 +28,7 @@
 
 start(_StartType, _StartArgs) ->
     ConfFile = "/opt/emqx/etc/emqx_plugin_kafka.conf",
-    DefaultConfFile = load_config(string:concat(code:priv_dir(emqx_plugin_kafka), "/config.hocon")),
+    DefaultConfFile = string:concat(code:priv_dir(emqx_plugin_kafka), "/config.hocon"),
 
     case
         case filelib:is_regular(ConfFile) of

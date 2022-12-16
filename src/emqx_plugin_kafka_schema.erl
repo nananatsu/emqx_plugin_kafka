@@ -19,7 +19,22 @@ fields(client) ->
         {connection_strategy, typerefl:atom()},
         {min_metadata_refresh_interval, typerefl:integer()},
         {query_api_versions, typerefl:boolean()},
-        {request_timeout, typerefl:integer()}
+        {request_timeout, typerefl:integer()},
+        {sasl, ?R_REF(sasl)},
+        {ssl, ?R_REF(ssl)}
+    ];
+fields(sasl) ->
+    [
+        {mechanism, typerefl:atom()},
+        {username, typerefl:string()},
+        {password, typerefl:string()}
+    ];
+fields(ssl) ->
+    [
+        {verify, typerefl:atom()},
+        {ca_cert_file, typerefl:string()},
+        {depth, typerefl:integer()},
+        {customize_hostname_check, typerefl:boolean()}
     ];
 fields(producer) ->
     [

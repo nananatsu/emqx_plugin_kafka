@@ -34,14 +34,62 @@ start_kafka(ClientConf) ->
         Address
     ),
 
-    Conf = #{
-        connection_strategy => maps:get(<<"(connection_strategy">>, ClientConf, per_partition),
-        min_metadata_refresh_interval => maps:get(
-            <<"min_metadata_refresh_interval">>, ClientConf, 5000
-        ),
-        query_api_versions => maps:get(<<"query_api_versions">>, ClientConf, true),
-        request_timeout => maps:get(<<"request_timeout">>, ClientConf, 240000)
-    },
+    Conf = maps:fold(
+        fun(Key, Value, Acc) ->
+            case Key of
+                <<"connection_strategy">> ->
+                    [{connection_strategy, Value} | Acc];
+                <<"min_metadata_refresh_interval">> ->
+                    [{min_metadata_refresh_interval, Value} | Acc];
+                <<"query_api_versions">> ->
+                    [{query_api_versions, Value} | Acc];
+                <<"request_timeout">> ->
+                    [{request_timeout, Value} | Acc];
+                <<"sasl">> ->
+                    [
+                        {sasl, {
+                            maps:get(<<"mechanism">>, Value, plain),
+                            maps:get(<<"username">>, Value, undefined),
+                            maps:get(<<"password">>, Value, undefined)
+                        }}
+                        | Acc
+                    ];
+                <<"ssl">> ->
+                    [
+                        {ssl,
+                            maps:fold(
+                                fun(SslPropKey, SslPropValue, SslAcc) ->
+                                    case SslPropKey of
+                                        <<"verify">> ->
+                                            [{verify, SslPropValue} | SslAcc];
+                                        <<"ca_cert_file">> ->
+                                            [{cacertfile, SslPropValue} | SslAcc];
+                                        <<"depth">> ->
+                                            [{depth, SslPropValue} | SslAcc];
+                                        <<"customize_hostname_check">> ->
+                                            [
+                                                {customize_hostname_check, [
+                                                    {match_fun,
+                                                        public_key:pkix_verify_hostname_match_fun(
+                                                            https
+                                                        )}
+                                                ]}
+                                                | SslAcc
+                                            ]
+                                    end
+                                end,
+                                [],
+                                Value
+                            )}
+                        | Acc
+                    ];
+                _ ->
+                    Acc
+            end
+        end,
+        [],
+        ClientConf
+    ),
 
     logger:debug("connect kafka ~p ~p ~p ", [ClientId, KafkaEndpoints, Conf]),
 
@@ -50,7 +98,7 @@ start_kafka(ClientConf) ->
         wolff:ensure_supervised_client(
             ClientId,
             KafkaEndpoints,
-            Conf
+            maps:from_list(Conf)
         ),
     ClientId.
 

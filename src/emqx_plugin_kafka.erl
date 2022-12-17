@@ -75,7 +75,9 @@ start_kafka(ClientConf) ->
                                                         )}
                                                 ]}
                                                 | SslAcc
-                                            ]
+                                            ];
+                                        _ ->
+                                            SslAcc
                                     end
                                 end,
                                 [],
@@ -171,17 +173,18 @@ fill_value_pattern(ValuePattern, {Node, From, Topic, {Payload, PayloadFormat}, U
             lists:map(
                 fun
                     ({str, Str}) ->
-                        binary_to_list(Str);
+                        t2l(Str);
                     ({var, {var, Key}}) ->
                         case Key of
-                            <<"clientid">> -> binary_to_list(From);
-                            <<"from">> -> binary_to_list(From);
-                            <<"username">> -> binary_to_list(Username);
-                            <<"topic">> -> binary_to_list(Topic);
-                            <<"payload">> -> binary_to_list(payload_format(Payload, PayloadFormat));
-                            <<"qos">> -> integer_to_list(Qos);
-                            <<"node">> -> binary_to_list(a2b(Node));
-                            <<"ts">> -> integer_to_list(Ts)
+                            <<"clientid">> -> t2l(From);
+                            <<"from">> -> t2l(From);
+                            <<"username">> -> t2l(Username);
+                            <<"topic">> -> t2l(Topic);
+                            <<"payload">> -> t2l(payload_format(Payload, PayloadFormat));
+                            <<"qos">> -> t2l(Qos);
+                            <<"node">> -> t2l(a2b(Node));
+                            <<"ts">> -> t2l(Ts);
+                            _ -> []
                         end
                 end,
                 ValuePattern
@@ -200,6 +203,15 @@ data_format(Data) when is_binary(Data) ->
     Data;
 data_format(Data) ->
     emqx_json:encode(Data).
+
+t2l(T) when is_binary(T) ->
+    binary_to_list(T);
+t2l(T) when is_integer(T) ->
+    integer_to_list(T);
+t2l(T) when is_list(T) ->
+    T;
+t2l(_) ->
+    [].
 
 a2b(A) when is_atom(A) ->
     erlang:atom_to_binary(A, utf8);

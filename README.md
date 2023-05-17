@@ -1,10 +1,8 @@
 # emqx-plugin-kafka
 
-This is a template plugin for EMQX >= 5.0.
+This is a kafka plugin for EMQX >= 5.0.
 
-For EMQX >= 4.3, please see branch emqx-v4
-
-For older EMQX versions, plugin development is no longer maintained.
+[代码说明](./code.md)
 
 ## Release
 

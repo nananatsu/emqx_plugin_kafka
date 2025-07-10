@@ -44,17 +44,49 @@
 -import(proplists, [get_value/2, get_value/3]).
 -import(emqx_plugin_kafka, [start_kafka/1, start_producer/5, send_msg_to_kafka/6]).
 
+%% 获取或创建producer，使用缓存避免重复创建相同topic的producer
+get_or_create_producer(ClientId, Topic, Name, ProducerConf, TopicProducerConf, ProducerCache) ->
+    %% 生成缓存键，基于topic和配置的hash
+    CacheKey = {Topic, erlang:phash2({ProducerConf, TopicProducerConf})},
+
+    case ets:lookup(ProducerCache, CacheKey) of
+        [{CacheKey, {PayloadFormat, Sync, Timeout, Producers}}] ->
+            %% 从缓存中返回已存在的producer
+            logger:debug("Reusing cached producer for topic: ~p", [Topic]),
+            {ok, PayloadFormat, Sync, Timeout, Producers};
+        [] ->
+            %% 缓存中不存在，创建新的producer
+            case start_producer(ClientId, Topic, Name, ProducerConf, TopicProducerConf) of
+                {ok, PayloadFormat, Sync, Timeout, Producers} ->
+                    %% 将新创建的producer存入缓存
+                    ets:insert(
+                        ProducerCache, {CacheKey, {PayloadFormat, Sync, Timeout, Producers}}
+                    ),
+                    logger:debug("Created and cached new producer for topic: ~p", [Topic]),
+                    {ok, PayloadFormat, Sync, Timeout, Producers};
+                {error, Error} ->
+                    {error, Error}
+            end
+    end.
+
 %% Called when the plugin application start
 load(ClientConf, ProducerConf, HooKConf) ->
     ClientId = start_kafka(ClientConf),
     GroupedHooks = parse_hook(HooKConf),
+
+    %% 创建producer缓存表
+    ProducerCache = ets:new(kafka_producer_cache, [set, private]),
 
     {NProducers, ProcessedHooks} = lists:foldl(
         fun({Hook, Rules}, {ProducerAcc, HookAcc}) ->
             {RuleProducers, ProcessedRules} = lists:foldl(
                 fun({Filter, Key, Value, Topic, Seq, TopicProducerConf}, {PAcc, RAcc}) ->
                     Name = list_to_atom(lists:concat([atom_to_list(Hook), "_", Seq])),
-                    case start_producer(ClientId, Topic, Name, ProducerConf, TopicProducerConf) of
+                    case
+                        get_or_create_producer(
+                            ClientId, Topic, Name, ProducerConf, TopicProducerConf, ProducerCache
+                        )
+                    of
                         {ok, PayloadFormat, Sync, Timeout, Producers} ->
                             Rule = {Filter, Producers, Key, Value, PayloadFormat, Sync, Timeout},
                             {[Producers | PAcc], [Rule | RAcc]};
@@ -77,6 +109,10 @@ load(ClientConf, ProducerConf, HooKConf) ->
         {[], []},
         GroupedHooks
     ),
+
+    %% 清理缓存表
+    ets:delete(ProducerCache),
+
     logger:info("~s is loaded.~n", [emqx_plugin_kafka]),
     {ok, ClientId, NProducers, ProcessedHooks}.
 
@@ -126,7 +162,7 @@ load_(Hook, Rules) ->
 
 unload(HookList) ->
     lists:foreach(
-        fun({Hook, _, _, _, _, _, _}) ->
+        fun({Hook, _}) ->
             unload_(Hook)
         end,
         HookList
@@ -179,9 +215,11 @@ unload_(Hook) ->
 hook(HookPoint, MFA) ->
     %% use highest hook priority so this module's callbacks
     %% are evaluated before the default hooks in EMQX
+    logger:debug("hook ~p with MFA ~p", [HookPoint, MFA]),
     emqx_hooks:add(HookPoint, MFA, _Property = ?HP_HIGHEST).
 
 unhook(HookPoint, MFA) ->
+    logger:debug("unhook ~p with MFA ~p", [HookPoint, MFA]),
     emqx_hooks:del(HookPoint, MFA).
 
 on_client_connect(ClientInfo, Props, Rules) ->
@@ -353,6 +391,7 @@ send(
     #{clientid := ClientId, username := Username},
     {_, Producers, Key, Value, _, Sync, Timeout}
 ) ->
+    logger:debug("send client info (clientid: ~p, username: ~p) to kafka", [ClientId, Username]),
     send_msg_to_kafka(
         Producers,
         {
@@ -370,13 +409,23 @@ send(
         Timeout
     );
 %% 单个规则的发送函数 - 处理Message
-send(Msg, {Filter, Producers, Key, Value, PayloadFormat, Sync, Timeout}) when is_record(Msg, message) ->
+send(Msg, {Filter, Producers, Key, Value, PayloadFormat, Sync, Timeout}) when
+    is_record(Msg, message)
+->
     Topic = emqx_message:topic(Msg),
+    logger:debug("send messag(topic:  ~p, message: ~p) to kafka, filter: ~p match? ~p", [
+        Topic, emqx_message:payload(Msg), Filter, emqx_topic:match(Topic, Filter)
+    ]),
     case emqx_topic:match(Topic, Filter) of
         true ->
             From = emqx_message:from(Msg),
             Payload = emqx_message:payload(Msg),
-            Headers = emqx_message:headers(Msg),
+            case erlang:function_exported(emqx_message, headers, 1) of
+                true ->
+                    Headers = emqx_message:headers(Msg);
+                false ->
+                    Headers = emqx_message:get_headers(Msg)
+            end,
             Qos = emqx_message:qos(Msg),
             Ts = emqx_message:timestamp(Msg),
             send_msg_to_kafka(
@@ -401,6 +450,9 @@ send(Msg, {Filter, Producers, Key, Value, PayloadFormat, Sync, Timeout}) when is
 
 %% 带Topic和Qos的单个规则发送函数
 send(ClientInfo, Topic, Qos, {Filter, Producers, Key, Value, _, Sync, Timeout}) ->
+    logger:debug("send Topic Info ~p ~p to kafka, filter: ~p match? ~p", [
+        Topic, Qos, Filter, emqx_topic:match(Topic, Filter)
+    ]),
     case emqx_topic:match(Topic, Filter) of
         true ->
             ClientId = maps:get(clientid, ClientInfo, undefined),

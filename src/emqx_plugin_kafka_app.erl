@@ -44,8 +44,8 @@ start(_StartType, _StartArgs) ->
     end.
 
 stop(#{client_id := ClientId, n_producers := NProducers, hook := HookList}) ->
+    logger:info("stop emqx_plugin_kafka"),
     emqx_plugin_kafka_hook:unload(HookList),
-
     lists:foreach(
         fun(Producers) ->
             wolff:stop_and_delete_supervised_producers(Producers)

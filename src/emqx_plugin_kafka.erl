@@ -159,23 +159,32 @@ fill_value_pattern(ValuePattern, {Node, From, Topic, {Payload, PayloadFormat}, U
                     ({str, Str}) ->
                         t2l(Str);
                     ({var, {var, Key}}) ->
-                        case Key of
-                            <<"clientid">> -> t2l(From);
-                            <<"from">> -> t2l(From);
-                            <<"username">> -> t2l(Username);
-                            <<"topic">> -> t2l(Topic);
-                            <<"payload">> -> t2l(payload_format(Payload, PayloadFormat));
-                            <<"qos">> -> t2l(Qos);
-                            <<"node">> -> t2l(a2b(Node));
-                            <<"ts">> -> t2l(Ts);
-                            _ -> []
-                        end
+                        get_pattern_value(
+                            Key, {Node, From, Topic, {Payload, PayloadFormat}, Username, Qos, Ts}
+                        );
+                    ({var, [Key]}) ->
+                        get_pattern_value(
+                            Key, {Node, From, Topic, {Payload, PayloadFormat}, Username, Qos, Ts}
+                        )
                 end,
                 ValuePattern
             ),
             ""
         )
     ).
+
+get_pattern_value(Key, {Node, From, Topic, {Payload, PayloadFormat}, Username, Qos, Ts}) ->
+    case Key of
+        <<"clientid">> -> t2l(From);
+        <<"from">> -> t2l(From);
+        <<"username">> -> t2l(Username);
+        <<"topic">> -> t2l(Topic);
+        <<"payload">> -> t2l(payload_format(Payload, PayloadFormat));
+        <<"qos">> -> t2l(Qos);
+        <<"node">> -> t2l(a2b(Node));
+        <<"ts">> -> t2l(Ts);
+        _ -> []
+    end.
 
 payload_format(Payload, PayloadFormat) ->
     case PayloadFormat of

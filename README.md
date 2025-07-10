@@ -1,6 +1,6 @@
 # emqx-plugin-kafka
 
-This is a kafka plugin for EMQX >= 5.1.
+This is a kafka plugin for EMQX >= 5.1 (test for 5.8.7) .
 
 [代码说明](./code.md)
 
